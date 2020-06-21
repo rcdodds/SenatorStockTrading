@@ -1,11 +1,11 @@
 # A script to track recent stock trades by Congress members
+import csv
+import time
+
+import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.common.action_chains import ActionChains
-import pandas as pd
-import time
-import csv
-import os.path
-from os import path
+
 
 def scrape_senate_efds():
     # Open the webpage
@@ -48,9 +48,10 @@ def scrape_senate_efds():
     while True:
         # Pull header info from rows of table - relies on table being 5 columns in the correct order
         report_headers.extend([cell.text for cell in driver.find_elements_by_xpath('.//td')])
-        # Open each report and store transactional data
+
+        # Store list of links to be opened
         report_links = driver.find_elements_by_xpath('//a[contains(@href,\'search/view\')]')
-        print(report_links)
+
         # Ensure the first report is within view
         actions = ActionChains(driver)
         actions.move_to_element(report_links[0]).perform()
@@ -60,8 +61,11 @@ def scrape_senate_efds():
             # Open report in new tab & switch to it
             link.click()
             driver.switch_to.window(driver.window_handles[1])
+
             # Store all transactions as a single list - relies on table being
-            report_transactions.append([cell.text.replace('\n',' ')  for cell in driver.find_elements_by_xpath('.//td')])
+            report_transactions.append(
+                [cell.text.replace('\n', ' ') for cell in driver.find_elements_by_xpath('.//td')])
+
             # Close the report tab & switch back to search results
             driver.close()
             driver.switch_to.window(driver.window_handles[0])
@@ -93,6 +97,7 @@ def scrape_senate_efds():
             writer = csv.writer(f)
             writer.writerows(report_transactions)
 
+
 # Combine header data & transaction data
 def merge_data():
     # Read header CSV file into a data frame
@@ -109,14 +114,20 @@ def merge_data():
     for ind, amd in amendments.iterrows():
         # Store the title of the report without any amendments
         title = amd.report_title[0:len('Periodic Transaction Report for 00/00/0000')]
+
         # Store the version (number after amendment)
         try:
             version = int(amd.report_title[-2:-1])
         except:
-            version = 1     # If a version if not listed, assume it is the first and only amendment
+            version = 1  # If a version if not listed, assume it is the first and only amendment
+
         # Store the information for the reports which should be ignored
         for v in range(version):
-            ignore.append([amd.first_name, amd.last_name, title + ' (Amendment '*v + str(v)*v + ')'*v])
+            if v:
+                ignore.append([amd.first_name, amd.last_name, title + ' (Amendment ' + str(v) + ')'])
+            else:
+                ignore.append([amd.first_name, amd.last_name, title])
+
     # Log ignore lists
     with open('amended_reports.csv', 'w', newline='') as fl:
         writer = csv.writer(fl)
@@ -128,13 +139,21 @@ def merge_data():
         # Skip reports on the ignore list
         if not [header['first_name'][rep], header['last_name'][rep], header['report_title'][rep]] in ignore:
             # For each existing transaction, save the header & transaction information
-            for trns in range(int(len(transactions[rep])/9)):
-                senate_trades.append([header['first_name'][rep], header['last_name'][rep], header['report_title'][rep], header['date_filed'][rep], transactions[rep][9*trns], transactions[rep][9*trns+1], transactions[rep][9*trns+3], transactions[rep][9*trns+4], transactions[rep][9*trns+5], transactions[rep][9*trns+6], transactions[rep][9*trns+7], transactions[rep][9*trns+8]])
-    senate_efds = pd.DataFrame(senate_trades, columns = ['first_name', 'last_name', 'report_title', 'date_filed', 'transaction_id', 'transaction_date', 'security', 'company', 'security_type', 'transaction_type', 'amount_range', 'comment'])
+            for trns in range(int(len(transactions[rep]) / 9)):
+                senate_trades.append([header['first_name'][rep], header['last_name'][rep], header['report_title'][rep],
+                                      header['date_filed'][rep], transactions[rep][9 * trns],
+                                      transactions[rep][9 * trns + 1], transactions[rep][9 * trns + 3],
+                                      transactions[rep][9 * trns + 4], transactions[rep][9 * trns + 5],
+                                      transactions[rep][9 * trns + 6], transactions[rep][9 * trns + 7],
+                                      transactions[rep][9 * trns + 8]])
+    senate_efds = pd.DataFrame(senate_trades,
+                               columns=['first_name', 'last_name', 'report_title', 'date_filed', 'transaction_id',
+                                        'transaction_date', 'security', 'company', 'security_type', 'transaction_type',
+                                        'amount_range', 'comment'])
     # Write master data set to CSV
     senate_efds.to_csv('Senate EFDs.csv')
+
 
 # Call functions as necessary
 # scrape_senate_efds()      # Comment out to avoid lengthy scraping process when testing data manipulation
 merge_data()
-
