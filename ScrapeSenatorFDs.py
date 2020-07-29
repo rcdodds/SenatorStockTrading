@@ -1,42 +1,119 @@
 # A script to track recent stock trades by Congress members
 import csv
 import time
+import datetime
 import sqlite3
 from sqlite3 import Error
 
 import pandas as pd
 from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
 
 
-# Scrape the report data from the senate EFD website & store in CSV
-def scrape_headers(driver, connection):
-    # Open the web page
-    url = 'https://efdsearch.senate.gov/search/'
-    driver.get(url)
+# Create database schema only if it doesn't already exist
+def create_db_tables(con, c):
+    create_header_table = """ CREATE TABLE IF NOT EXISTS header (
+                                         report_id integer PRIMARY KEY,
+                                         first_name text,
+                                         last_name text,
+                                         report_title text,
+                                         date_filed text,
+                                         report_link text); """
+    c.execute(create_header_table)
+    create_transactions_table = """CREATE TABLE IF NOT EXISTS transactions (
+                                     master_transaction_id integer PRIMARY KEY,
+                                     report_id integer NOT NULL,
+                                     transaction_id integer NOT NULL,
+                                     transaction_date text,
+                                     owner text,
+                                     security text,
+                                     company text,
+                                     security_type text,
+                                     transaction_type text,
+                                     amount_range text,
+                                     comment text,
+                                     FOREIGN KEY (report_id) REFERENCES header (report_id));"""
+    c.execute(create_transactions_table)
 
+
+# Determine most recent report date. Clear out data from that day to ensure the delta load gets everything
+def most_recent_report(sql_db, crsr):
+    # Reports up to what date have already been scraped
+    file_dates = pd.read_sql_query('SELECT DISTINCT date_filed FROM header', con=sql_db)
+    file_dates['date_filed'] = file_dates['date_filed'].astype('datetime64[ns]')
+    max_date = max(file_dates['date_filed'])
+
+    # Remove report headers filed on the most recent file date
+    del_rep_query = """DELETE FROM header
+                        WHERE (report_id NOT IN (SELECT DISTINCT report_id FROM transactions))
+                        OR date_filed=?"""
+    crsr.execute(del_rep_query, (str(max_date),))
+
+    # Remove report transactions associated with reports that were removed
+    trn_wo_rep_query = """DELETE FROM transactions
+                            WHERE report_id NOT IN (SELECT DISTINCT report_id FROM header)"""
+    crsr.execute(trn_wo_rep_query)
+
+    # Commit the database updates
+    sql_db.commit()
+    return str(max_date)
+
+
+# Open a Selenium browser while printing status updates. Return said browser for use in scraping.
+def open_efd_website():
+    # Selenium browser options
+    chrome_options = Options()
+    # chrome_options.add_argument("--headless")       # Comment out to watch browser while scraping
+
+    # Open the browser
+    print('Opening Selenium browser')
+    chromedriver_path = 'C:\\Users\\RyanDodds\\Documents\\chromedriver_win32\\chromedriver.exe'
+    sele = webdriver.Chrome(executable_path=chromedriver_path, options=chrome_options)
+    print('Selenium browser opened')
+
+    # Open Senate EFD website
+    print('Opening senate EFD website')
+    sele.get('https://efdsearch.senate.gov/search/')
+    print('Senate EFD website opened')
+
+    # Agree not to use the data for anything illegal
+    print('Agreeing to not use the data for anything illegal')
+    sele.find_element_by_id('agree_statement').click()
+    print('Terms & Conditions have been accepted')
+    return sele
+
+
+# Scrape the report data from the senate EFD website. Stored in database table called 'header'.
+def scrape_headers(driver, connection, cr, from_date):
     # Search for the periodic transaction reports of active senators
-    driver.find_element_by_id('agree_statement').click()    # Agree not to use the data for anything illegal
-    driver.find_element_by_class_name('form-check-input.senator_filer').click()     # Check the senator checkbox
-    driver.find_element_by_class_name('btn.btn-primary').click()    # Click search
-    driver.find_element_by_class_name('form-control.ml-1.mr-1').send_keys('100')    # Show 100 results
-    time.sleep(1)   # Wait a second
-    driver.find_element_by_class_name('form-control.table__search.ml-2').send_keys('Periodic Transaction Report')   # Search for PTRs
-    time.sleep(1)   # Wait a second
-    driver.find_element_by_xpath('//*[contains(@aria-label,\'Date\')]').click()     # Sort by ascending date
-    time.sleep(1)   # Wait a second
+    driver.find_element_by_class_name('form-check-input.senator_filer').click()  # Check the senator checkbox
+    time.sleep(1)  # Wait a second
+    driver.find_element_by_id('fromDate').send_keys(from_date)
+    time.sleep(1)  # Wait a second
+    driver.find_element_by_class_name('btn.btn-primary').click()  # Click search
+    time.sleep(1)  # Wait a second
+    driver.find_element_by_class_name('form-control.ml-1.mr-1').send_keys('100')  # Show 100 results
+    time.sleep(1)  # Wait a second
+    driver.find_element_by_class_name('form-control.table__search.ml-2').send_keys(
+        'Periodic Transaction Report')  # Search for PTRs
+    time.sleep(1)  # Wait a second
+    driver.find_element_by_xpath('//*[contains(@aria-label,\'Date\')]').click()  # Sort by ascending date
+    time.sleep(1)  # Wait a second
 
     # Initialize empty lists to store data
-    report_headers, report_links, report_transactions = ([] for i in range(3))
+    report_headers, report_links = ([] for i in range(2))
 
     # Loop through each page
     while True:
         # Pull header info & report links - relies on table being 5 columns in the correct order
         report_headers.extend([cell.text for cell in driver.find_elements_by_xpath('.//td')])
-        report_links.extend([link.get_attribute('href') for link in driver.find_elements_by_xpath('//a[contains(@href,\'search/view\')]')])
+        report_links.extend([link.get_attribute('href')
+                             for link in driver.find_elements_by_xpath('//a[contains(@href,\'search/view\')]')])
 
         # If the page just scraped was the last page, the scraping process is done
-        if driver.find_elements_by_class_name('paginate_button')[-2].get_attribute('class') == 'paginate_button current':
+        if driver.find_elements_by_class_name('paginate_button')[-2].get_attribute(
+                'class') == 'paginate_button current':
             # Close the driver
             driver.quit()
             break
@@ -55,6 +132,7 @@ def scrape_headers(driver, connection):
     # Create header data frame
     header_list = list(zip(first_name, last_name, report_title, date_filed, report_links))
     header = pd.DataFrame(header_list, columns=['first_name', 'last_name', 'report_title', 'date_filed', 'report_link'])
+    header['date_filed'] = header['date_filed'].astype('datetime64[ns]')
 
     # Remove PDF reports
     header = header[~header.report_link.str.contains('paper')].reset_index(drop=True)
@@ -63,27 +141,30 @@ def scrape_headers(driver, connection):
     header = ignore_amended(header).reset_index(drop=True)
 
     # Export data
-    header.to_sql(name='header', con=connection, if_exists='replace', index_label='report_id')
-    header.to_csv('header.csv')
+    header.to_sql(name='header', con=connection, if_exists='append', index=False)
+
+    return
 
 
-# Scrape transactions  -- not revised to use database yet
-def scrape_transactions(browser, connect):
-    # Open the web page & agree not to use the data for anything illegal
-    url = 'https://efdsearch.senate.gov/search/'
-    browser.get(url)
-    browser.find_element_by_id('agree_statement').click()
-
-    # Pull the header table
-    hdr = pd.read_sql_query('SELECT * FROM header', con=connect, index_col='report_id')
+# Scrape transactions within each report. Stored in database table called 'transactions'.
+def scrape_transactions(browser, connect, cursor):
+    # Pull the report links that need to be scraped
+    links_query = """SELECT report_id, report_link
+                     FROM header
+                     WHERE report_id NOT IN (SELECT DISTINCT report_id FROM transactions)"""
+    links = cursor.execute(links_query).fetchall()
+    print(links)
 
     all_transactions = []
 
     # Store the transactions of each report
-    for index, link in hdr.iterrows():
-        print('link = ', link['report_link'])
+    for report_info in links:
+        # Split tuple into two variables
+        rep_num = report_info[0]
+        link = report_info[1]
+
         # Open report in new tab & switch to it
-        browser.get(link['report_link'])
+        browser.get(link)
         time.sleep(2)
 
         # Store all transactions as a single list
@@ -91,23 +172,16 @@ def scrape_transactions(browser, connect):
 
         # Add relevant report id for linking to header table
         for trn in report_transactions:
-            trn.insert(0, index)
+            trn.insert(0, rep_num)
             all_transactions.append(trn)
 
     # Data frame for transactions
-    transactions = pd.DataFrame(all_transactions, columns=['report_id', 'transaction_id', 'transaction_date', 'owner', 'security',
-                                                           'company', 'security_type', 'transaction_type', 'amount_range', 'comment'])
+    transactions = pd.DataFrame(all_transactions, columns=['report_id', 'transaction_id', 'transaction_date',
+                                                           'owner', 'security', 'company', 'security_type',
+                                                           'transaction_type', 'amount_range', 'comment'])
 
     # Export data
-    transactions.to_sql(name='transactions', con=connect, if_exists='replace', index_label='mstr_trn_id')
-    transactions.to_csv('transactions.csv')
-
-
-# Give an overview of the database
-def view_database(con):
-    all_data = pd.read_sql_query('SELECT * FROM header, transactions WHERE header.report_id = transactions.report_id', con=con, index_col='mstr_trn_id')
-    print(all_data)
-    all_data.to_csv('SenateEFDs.csv')
+    transactions.to_sql(name='transactions', con=connect, if_exists='append', index=False)
 
 
 # Ignore reports that have been amended. Based on report title. Avoids unnecessary transaction scraping.
@@ -149,35 +223,62 @@ def ignore_amended(df):
     return df
 
 
+# Dump the database to CSVs
+def database_to_csv(database):
+    # Open cursor
+    cursor = database.cursor()
+
+    # Get list of tables
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = cursor.fetchall()
+
+    # Store each table in a CSV
+    for table_name in tables:
+        table_name = table_name[0]
+        table = pd.read_sql_query("SELECT * from %s" % table_name, database)
+        table.to_csv(table_name + '.csv', index=False)
+
+    # Combine header & transaction data in CSV
+    reports = pd.read_sql_query('SELECT * FROM header, transactions WHERE header.report_id = transactions.report_id',
+                                con=database)
+    reports.to_csv('SenateEFDs.csv')
+
+    # Close the cursor
+    cursor.close()
+
+
 # Split a long list 'list' into smaller lists of length 'n'
 def split_list(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
 
-# Chrome driver path
-driver_path = 'C:\\bin\\chromedriver.exe'
-# Database path
-db_path = 'C:\\Users\\RyanDodds\\Documents\\GitHub\\Senator_Stock_Trading\\SenateEFDs.db'
+# Main function
+def main():
+    # Open SQLite database connection
+    db_path = 'C:\\Users\\RyanDodds\\Documents\\GitHub\\Senator_Stock_Trading\\SenateEFDs.db'
+    db = sqlite3.connect(db_path)
+    cur = db.cursor()
 
-# Turn function calls on / off
-scrp_headers = False
-scrp_transactions = False
-view = True
+    # Create database tables if necessary
+    create_db_tables(db, cur)
 
-# Scrape new reports / transactions
-if scrp_headers:
-    hd_driver = webdriver.Chrome(executable_path=driver_path)
-    hd_conn = sqlite3.connect(db_path)
-    scrape_headers(hd_driver, hd_conn)
+    # Clear any data filed on the most recent file date
+    try:
+        start_datetime = most_recent_report(db, cur)
+        start_date = start_datetime[5:7] + '/' + start_datetime[8:10] + '/' + start_datetime[:4]
+    except:
+        start_date = '01/01/2012'
+    print(start_date)
 
-# Scrape new transactions
-if scrp_transactions:
-    trn_driver = webdriver.Chrome(executable_path=driver_path)
-    trn_conn = sqlite3.connect(db_path)
-    scrape_transactions(trn_driver, trn_conn)
+    # Scrape new data
+    scrape_headers(open_efd_website(), db, cur, start_date)
+    scrape_transactions(open_efd_website(), db, cur)
 
-# Let's actually use that data we worked so hard to get
-if view:
-    view_conn = sqlite3.connect(db_path)
-    view_database(view_conn)
+    # Dump database to CSVs
+    database_to_csv(db)
+
+
+# Let's get it going
+if __name__ == "__main__":
+    main()
