@@ -1,18 +1,15 @@
 # A script to track recent stock trades by Congress members
 import csv
 import time
-import datetime
 import sqlite3
-from sqlite3 import Error
 
 import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.action_chains import ActionChains
 
 
 # Create database schema only if it doesn't already exist
-def create_db_tables(con, c):
+def create_db_tables(c):
     create_header_table = """ CREATE TABLE IF NOT EXISTS header (
                                          report_id integer PRIMARY KEY,
                                          first_name text,
@@ -64,7 +61,7 @@ def most_recent_report(sql_db, crsr):
 def open_efd_website():
     # Selenium browser options
     chrome_options = Options()
-    # chrome_options.add_argument("--headless")       # Comment out to watch browser while scraping
+    chrome_options.add_argument("--headless")       # Comment out to watch browser while scraping
 
     # Open the browser
     print('Opening Selenium browser')
@@ -85,7 +82,7 @@ def open_efd_website():
 
 
 # Scrape the report data from the senate EFD website. Stored in database table called 'header'.
-def scrape_headers(driver, connection, cr, from_date):
+def scrape_headers(driver, connection, from_date):
     # Search for the periodic transaction reports of active senators
     driver.find_element_by_class_name('form-check-input.senator_filer').click()  # Check the senator checkbox
     time.sleep(1)  # Wait a second
@@ -153,12 +150,19 @@ def scrape_transactions(browser, connect, cursor):
                      FROM header
                      WHERE report_id NOT IN (SELECT DISTINCT report_id FROM transactions)"""
     links = cursor.execute(links_query).fetchall()
-    print(links)
+
+    # Print number of reports to scrape
+    num_links = str(len(links))
+    print(num_links + ' report(s) to scrape')
 
     all_transactions = []
 
     # Store the transactions of each report
     for report_info in links:
+        # Log status
+        current_link = str(links.index(report_info) + 1)
+        print('Scraping report ' + current_link + ' of ' + num_links)
+
         # Split tuple into two variables
         rep_num = report_info[0]
         link = report_info[1]
@@ -261,7 +265,7 @@ def main():
     cur = db.cursor()
 
     # Create database tables if necessary
-    create_db_tables(db, cur)
+    create_db_tables(cur)
 
     # Clear any data filed on the most recent file date
     try:
@@ -269,14 +273,22 @@ def main():
         start_date = start_datetime[5:7] + '/' + start_datetime[8:10] + '/' + start_datetime[:4]
     except:
         start_date = '01/01/2012'
-    print(start_date)
+        print('No max date found - using ' + start_date)
 
-    # Scrape new data
-    scrape_headers(open_efd_website(), db, cur, start_date)
+    # Scrape header information from new reports
+    print('Scraping report header information')
+    scrape_headers(open_efd_website(), db, start_date)
+    print('Done scraping report header information')
+
+    # Scrape transactions from new reports
+    print('Scraping transaction information')
     scrape_transactions(open_efd_website(), db, cur)
+    print('Done scraping transaction information')
 
-    # Dump database to CSVs
+    # Dump database tables to CSVs
+    print('Dumping database to CSVs')
     database_to_csv(db)
+    print('Done dumping database to CSVs')
 
 
 # Let's get it going
