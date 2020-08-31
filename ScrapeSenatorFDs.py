@@ -273,7 +273,8 @@ def main():
         start_date = start_datetime[5:7] + '/' + start_datetime[8:10] + '/' + start_datetime[:4]
     except:
         start_date = '01/01/2012'
-        print('No max date found - using ' + start_date)
+        print('No max date found')
+    print('Scraping reports filed on or after ' + start_date)
 
     # Scrape header information from new reports
     print('Scraping report header information')
